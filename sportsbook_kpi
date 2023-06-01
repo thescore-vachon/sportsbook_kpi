@@ -1,0 +1,386 @@
+WITH bet_figures AS (
+  SELECT
+      TRUNC((CONVERT_TIMEZONE('America/Toronto', b.closed_at))) as date
+      , COUNT(DISTINCT b.id) AS bets
+      , ROUND(SUM(b.settled_cash + b.settled_free),0) AS total_handle
+      , ROUND(SUM(b.settled_cash),0) AS cash_handle -- shouldn't this user wagered_cash and wagered_free
+      , ROUND(SUM(b.settled_free),0) AS free_handle
+      , ROUND(SUM(b.ggr),0) AS ggr
+      , round(SUM(sacb.ngr),0) AS ngr
+
+  FROM curated.aec.fct_bets_ca b
+  LEFT JOIN sbk_and_casino.fct_bonus_playthrough_ca sacb
+  ON b.id = sacb.bet_id
+  WHERE b.status = 'settled'
+  GROUP BY 1
+)
+
+, day_clean AS (
+SELECT
+    date
+    , DATE_TRUNC('week', date) AS week
+    , DATE_TRUNC('month', date) AS month
+    , DATE_TRUNC('quarter', date) AS quarter
+    , DATE_TRUNC('year', date) AS year
+    , '3'::INT AS val
+    , 'Total Handle ($)' AS metric
+    , total_handle AS day
+FROM bet_figures
+UNION ALL
+SELECT
+    date
+    , DATE_TRUNC('week', date) AS week
+    , DATE_TRUNC('month', date) AS month
+    , DATE_TRUNC('quarter', date) AS quarter
+    , DATE_TRUNC('year', date) AS year
+    , '4'::INT AS val
+    , 'Cash Handle ($)' AS metric
+    , cash_handle AS day
+FROM bet_figures
+UNION ALL
+SELECT
+    date
+    , DATE_TRUNC('week', date) AS week
+    , DATE_TRUNC('month', date) AS month
+    , DATE_TRUNC('quarter', date) AS quarter
+    , DATE_TRUNC('year', date) AS year
+    , '5'::INT AS val
+    , 'Free Handle ($)' AS metric
+    , free_handle AS day
+FROM bet_figures
+UNION ALL
+SELECT
+    date
+    , DATE_TRUNC('week', date) AS week
+    , DATE_TRUNC('month', date) AS month
+    , DATE_TRUNC('quarter', date) AS quarter
+    , DATE_TRUNC('year', date) AS year
+    , '6'::INT AS val
+    , 'GGR ($)' AS metric
+    , ggr AS day
+FROM bet_figures
+UNION ALL
+SELECT
+    date
+    , DATE_TRUNC('week', date) AS week
+    , DATE_TRUNC('month', date) AS month
+    , DATE_TRUNC('quarter', date) AS quarter
+    , DATE_TRUNC('year', date) AS year
+    , '8'::INT AS val
+    , 'NGR ($)' AS metric
+    , ngr AS day
+FROM bet_figures
+UNION ALL
+SELECT
+    date
+    , DATE_TRUNC('week', date) AS week
+    , DATE_TRUNC('month', date) AS month
+    , DATE_TRUNC('quarter', date) AS quarter
+    , DATE_TRUNC('year', date) AS year
+    , '10'::INT AS val
+    , 'Bet Count (#)' AS metric
+    , bets AS day
+FROM bet_figures
+)
+
+---- works up to this point ---
+
+, pop_cumulative AS (
+SELECT
+  date
+  , week
+  , month
+  , quarter
+  , year
+  , val
+  , metric
+  , day
+  , SUM(day) OVER(PARTITION BY week, metric ORDER BY date ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS cumu_week
+  , SUM(day) OVER(PARTITION BY month, metric ORDER BY date ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS cumu_month
+  , SUM(day) OVER(PARTITION BY quarter, metric ORDER BY date ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS cumu_quarter
+  , SUM(day) OVER(PARTITION BY year, metric ORDER BY date ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS cumu_year
+  , DATEDIFF(days, DATE_TRUNC('week',date), date)+1 AS days_in_week_elapsed
+  , DATEDIFF(days, DATE_TRUNC('month',date), date)+1 AS days_in_month_elapsed
+  , DATEDIFF(days, DATE_TRUNC('quarter',date), date)+1 AS days_in_quarter_elapsed
+FROM day_clean
+)
+
+--- works from here ---
+-- select *
+--      from pop_cumulative
+--         where day = 0
+
+
+, pop_pct AS (
+SELECT
+  date
+  , val
+  , metric
+  , day
+  , cumu_week AS week
+  , cumu_month AS month
+  , cumu_quarter AS quarter
+  , cumu_year AS year
+  , 1.0*(day - LAG(day) OVER(PARTITION BY metric ORDER BY date))/ABS(LAG(day) OVER(PARTITION BY metric ORDER BY date)) AS day_pct
+  , 1.0*(cumu_week - LAG(cumu_week) OVER(PARTITION BY days_in_week_elapsed, metric ORDER BY week)) / ABS(LAG(cumu_week) OVER(PARTITION BY days_in_week_elapsed, metric ORDER BY week)) AS week_pct
+  , 1.0*(cumu_month - LAG(cumu_month) OVER(PARTITION BY days_in_month_elapsed, metric ORDER BY month)) / ABS(LAG(cumu_month) OVER(PARTITION BY days_in_month_elapsed, metric ORDER BY month)) AS month_pct
+  , 1.0*(cumu_quarter - LAG(cumu_quarter) OVER(PARTITION BY days_in_quarter_elapsed, metric ORDER BY quarter)) / ABS(LAG(cumu_quarter) OVER(PARTITION BY days_in_quarter_elapsed, metric ORDER BY quarter)) AS quarter_pct
+FROM pop_cumulative
+where date >= '2022-04-04'
+)
+
+, clean_metrics AS (
+SELECT
+  date
+  , val::INT
+  , metric
+  , day
+  , week
+  , month
+  , quarter
+  , year
+  , day_pct
+  , week_pct
+  , month_pct
+  , quarter_pct
+FROM pop_pct
+)
+, daily_ggr AS (
+  SELECT date, day AS ggr_day, week AS ggr_week, month AS ggr_month, quarter AS ggr_quarter, year AS ggr_year
+  FROM clean_metrics
+  WHERE val=6
+)
+, daily_handle AS (
+  SELECT date, day AS handle_day, week AS handle_week, month AS handle_month, quarter AS handle_quarter, year AS handle_year
+  FROM clean_metrics
+  WHERE val=3
+)
+, hold AS (
+  SELECT
+      date
+      , '7'::INT AS val
+      , 'Hold (%)' AS metric
+      , 100*ggr_day / handle_day AS day
+      , 100*ggr_week / handle_week AS week
+      , 100*ggr_month / handle_month AS month
+      , 100*ggr_quarter / handle_quarter AS quarter
+      , 100*ggr_year / handle_year AS year
+      , DATEDIFF(days, DATE_TRUNC('week',date), date)+1 AS days_in_week_elapsed
+      , DATEDIFF(days, DATE_TRUNC('month',date), date)+1 AS days_in_month_elapsed
+      , DATEDIFF(days, DATE_TRUNC('quarter',date), date)+1 AS days_in_quarter_elapsed
+  FROM daily_ggr
+  JOIN daily_handle
+      USING(date)
+)
+, hold_clean AS (
+  SELECT
+      date
+      , val
+      , metric
+      , ROUND(day,0) AS day_
+      , ROUND(week,0) AS week_
+      , ROUND(month,0) AS month_
+      , ROUND(quarter,0) AS quarter_
+      , ROUND(year,0) AS year_
+      , (1.0*(day - LAG(day) OVER(ORDER BY date)))/100 AS day_pct
+      , (1.0*(week - LAG(week) OVER(PARTITION BY days_in_week_elapsed ORDER BY date)))/100 AS week_pct
+      , (1.0*(month - LAG(month) OVER(PARTITION BY days_in_month_elapsed ORDER BY date)))/100 AS month_pct
+      , (1.0*(quarter - LAG(quarter) OVER(PARTITION BY days_in_quarter_elapsed ORDER BY date)))/100 AS quarter_pct
+  FROM hold
+)
+, daily_bets AS (
+  SELECT date, day AS bets_day, week AS bets_week, month AS bets_month, quarter AS bets_quarter, year AS bets_year
+  FROM clean_metrics
+  WHERE val=10
+)
+, daily_cash_handle AS (
+  SELECT date, day AS handle_day, week AS handle_week, month AS handle_month, quarter AS handle_quarter, year AS handle_year
+  FROM clean_metrics
+  WHERE val=4
+)
+, avg_cash_handle AS (
+  SELECT
+      date
+      , '9'::INT AS val
+      , 'Avg Cash Handle ($)' AS metric
+      , ROUND(handle_day / bets_day,0) AS day
+      , ROUND(handle_week / bets_week,0) AS week
+      , ROUND(handle_month / bets_month,0) AS month
+      , ROUND(handle_quarter / bets_quarter,0) AS quarter
+      , ROUND(handle_year / bets_year,0) AS year
+      , 1.0*(day - LAG(day) OVER(ORDER BY date)) / ABS(LAG(day) OVER(ORDER BY date)) AS day_pct
+      , 1.0*(week - LAG(week) OVER(ORDER BY date)) / ABS(LAG(week) OVER(ORDER BY date)) AS week_pct
+      , 1.0*(month - LAG(month) OVER(ORDER BY date)) / ABS(LAG(month) OVER(ORDER BY date)) AS month_pct
+      , 1.0*(quarter - LAG(quarter) OVER(ORDER BY date)) / ABS(LAG(quarter) OVER(ORDER BY date)) AS quarter_pct
+  FROM daily_cash_handle
+  JOIN daily_bets
+      USING(date)
+)
+---- loading issue comes from is_first_bet addition
+-- , first_bets AS (
+--   SELECT DISTINCT
+--      b.user_id
+--     ,FIRST_VALUE(b.id) OVER (
+--       PARTITION BY b.user_id ORDER BY b.placed_at
+--       ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
+--       ) AS first_bet_id
+--   FROM curated.aec.fct_bets_ca b
+-- )
+
+   , first_bet_helper as (
+SELECT *
+    , MIN(placed_at) OVER(PARTITION BY user_id) as first_placed_date
+    , CASE WHEN first_placed_date = placed_at THEN TRUE ELSE FALSE END as is_first_bet
+    FROM curated.aec.fct_bets_ca
+)
+
+, player_count_helper AS (
+      SELECT
+          TRUNC(convert_timezone('America/Toronto', placed_at)) AS date
+          , DATE_TRUNC('week',date) AS week_
+          , DATE_TRUNC('month',date) AS month_
+          , DATE_TRUNC('quarter',date) AS quarter_
+          , DATE_TRUNC('year',date) AS year_
+          , TRUNC(date) AS cutoff_day
+          , TRUNC(LEAST(date,DATEADD(week,1,week_))) as cutoff_week
+          , TRUNC(LEAST(date,DATEADD(month,1,month_))) as cutoff_month
+          , TRUNC(LEAST(date,DATEADD(quarter,1,quarter_))) as cutoff_quarter
+          , TRUNC(LEAST(date,DATEADD(year,1,year_))) as cutoff_year
+          , user_id
+          , free_bet_id
+          , is_first_bet
+      FROM first_bet_helper
+      WHERE status NOT IN ('voided','cancelled')
+      )
+
+, cal AS (
+      SELECT DISTINCT
+          'Day' AS date_group
+          , 1 AS date_group_enum
+          , date AS start_date
+          , cutoff_day AS end_date
+      FROM player_count_helper
+      UNION
+      SELECT DISTINCT
+          'Week' AS date_group
+          , 2 AS date_group_enum
+          , week_ AS start_date
+          , cutoff_week AS end_date
+      FROM player_count_helper
+      UNION
+      SELECT DISTINCT
+          'Month' AS date_group
+          , 3 AS date_group_enum
+          , month_ AS start_date
+          , cutoff_month AS end_date
+      FROM player_count_helper
+      UNION
+      SELECT DISTINCT
+          'Quarter' AS date_group
+          , 4 AS date_group_enum
+          , quarter_ AS start_date
+          , cutoff_quarter AS end_date
+      FROM player_count_helper
+      UNION
+      SELECT DISTINCT
+          'Year' AS date_group
+          , 5 AS date_group_enum
+          , year_ AS start_date
+          , cutoff_year AS end_date
+      FROM player_count_helper
+      )
+      , player_count_helper_2 AS (
+      SELECT
+            date_group
+          , date_group_enum
+          , start_date
+          , end_date AS date
+          , COUNT(DISTINCT user_id) AS active_players
+          , COUNT(DISTINCT CASE WHEN is_first_bet = TRUE THEN user_id END) AS first_time_players
+    FROM player_count_helper pch
+    JOIN cal c
+    ON pch.date BETWEEN c.start_date AND c.end_date
+    GROUP BY 1,2,3,4
+)
+
+      , active_player_pivot_table AS (
+          SELECT *
+          FROM (SELECT active_players, date, date_group_enum FROM player_count_helper_2)
+          PIVOT (SUM(active_players) FOR date_group_enum IN (1 AS day, 2 AS week, 3 AS month, 4 AS quarter, 5 AS year))
+      )
+      , first_time_player_pivot_table AS (
+          SELECT *
+          FROM (SELECT first_time_players, date, date_group_enum FROM player_count_helper_2)
+          PIVOT (SUM(first_time_players) FOR date_group_enum IN (1 AS day, 2 AS week, 3 AS month, 4 AS quarter, 5 AS year))
+      )
+      , active_player_count_helper AS (
+      SELECT
+          date
+          , '1'::INT AS val
+          , 'Active Players (#)' AS metric
+          , day
+          , week
+          , month
+          , quarter
+          , year
+          , DATEDIFF(days, DATE_TRUNC('week',date), date)+1 AS days_in_week_elapsed
+          , DATEDIFF(days, DATE_TRUNC('month',date), date)+1 AS days_in_month_elapsed
+          , DATEDIFF(days, DATE_TRUNC('quarter',date), date)+1 AS days_in_quarter_elapsed
+      FROM active_player_pivot_table
+      )
+      , active_players AS (
+      SELECT
+          date
+          , val
+          , metric
+          , day
+          , week
+          , month
+          , quarter
+          , year
+          , 1.0*(day - LAG(day) OVER(ORDER BY date))/ABS(LAG(day) OVER(ORDER BY date)) AS day_pct
+          , 1.0*(week - LAG(week) OVER(PARTITION BY days_in_week_elapsed ORDER BY date)) / ABS(LAG(week) OVER(PARTITION BY days_in_week_elapsed ORDER BY date)) AS week_pct
+          , 1.0*(month - LAG(month) OVER(PARTITION BY days_in_month_elapsed ORDER BY date)) / ABS(LAG(month) OVER(PARTITION BY days_in_month_elapsed ORDER BY date)) AS month_pct
+          , 1.0*(month - LAG(month) OVER(PARTITION BY days_in_quarter_elapsed ORDER BY date)) / ABS(LAG(quarter) OVER(PARTITION BY days_in_quarter_elapsed ORDER BY date)) AS quarter_pct
+      FROM active_player_count_helper
+      )
+      , first_time_player_count_helper AS (
+      SELECT
+          date
+          , '2'::INT AS val
+          , 'First Time Players (#)' AS metric
+          , day
+          , week
+          , month
+          , quarter
+          , year
+          , DATEDIFF(days, DATE_TRUNC('week',date), date)+1 AS days_in_week_elapsed
+          , DATEDIFF(days, DATE_TRUNC('month',date), date)+1 AS days_in_month_elapsed
+          , DATEDIFF(days, DATE_TRUNC('quarter',date), date)+1 AS days_in_quarter_elapsed
+      FROM first_time_player_pivot_table
+      )
+      , first_time_players AS (
+      SELECT
+          date
+          , val
+          , metric
+          , day
+          , week
+          , month
+          , quarter
+          , year
+          , 1.0*(day - LAG(day) OVER(ORDER BY date))/ABS(LAG(day) OVER(ORDER BY date)) AS day_pct
+          , 1.0*(week - LAG(week) OVER(PARTITION BY days_in_week_elapsed ORDER BY date)) / ABS(LAG(week) OVER(PARTITION BY days_in_week_elapsed ORDER BY date)) AS week_pct
+          , 1.0*(month - LAG(month) OVER(PARTITION BY days_in_month_elapsed ORDER BY date)) / ABS(LAG(month) OVER(PARTITION BY days_in_month_elapsed ORDER BY date)) AS month_pct
+          , 1.0*(month - LAG(month) OVER(PARTITION BY days_in_quarter_elapsed ORDER BY date)) / ABS(LAG(quarter) OVER(PARTITION BY days_in_quarter_elapsed ORDER BY date)) AS quarter_pct
+      FROM first_time_player_count_helper
+      )
+SELECT * FROM clean_metrics
+UNION ALL
+SELECT * FROM hold_clean
+UNION ALL
+SELECT * FROM avg_cash_handle
+UNION ALL
+SELECT * FROM active_players
+UNION ALL
+SELECT * FROM first_time_players
