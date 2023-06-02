@@ -384,3 +384,4 @@ UNION ALL
 SELECT * FROM active_players
 UNION ALL
 SELECT * FROM first_time_players
+WHERE date = '2023-03-10'
